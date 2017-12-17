@@ -155,6 +155,12 @@ class Solver {
   virtual void ApplyUpdate(int param_id) = 0;
 
   void TestAll();
+//MPI function start
+  void find_net_size( int & param_size);
+  void copy_diffs_to_net(Dtype* diffs);
+  void copy_params_to_net(Dtype* params);
+  void copy_params_from_net(Dtype* params);
+  void copy_diffs_from_net(Dtype* diffs);
 
 
 #ifdef CAFFE_PER_LAYER_TIMINGS

@@ -59,8 +59,77 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <mlsl.h>
 #include <mpi.h>
 #endif /* USE_MLSL */
+#ifdef USE_SELF_MPI
+#include "caffe/util/mpi.hpp"
+#endif
+
 
 namespace caffe {
+template<typename Dtype>
+void Solver<Dtype>::copy_params_from_net(Dtype* params)
+{
+    std::vector<shared_ptr<Blob<Dtype> > > net_params = net_->params();
+    int offset = 0;
+    for (int i = 0; i < net_params.size(); ++i)
+    {
+        Blob<Dtype>* net_param = net_params[i].get();
+        memcpy(params+offset, net_param->cpu_data(), sizeof(Dtype)*net_param->count());
+        offset += net_param->count();
+    }
+}
+
+template<typename Dtype>
+void Solver<Dtype>::copy_diffs_from_net(Dtype* diffs)
+{
+    std::vector<shared_ptr<Blob<Dtype> > > net_params = net_->params();
+    int offset = 0;
+    for (int i = 0; i < net_params.size(); ++i)
+    {
+        Blob<Dtype>* net_param = net_params[i].get();
+        memcpy(diffs+offset, net_param->cpu_diff(), sizeof(Dtype)*net_param->count());
+        offset += net_param->count();
+    }
+}
+
+template<typename Dtype>
+void Solver<Dtype>::copy_params_to_net(Dtype* params)
+{
+    std::vector<shared_ptr<Blob<Dtype> > > net_params = net_->params();
+    int offset = 0;
+    for (int i = 0; i < net_params.size(); ++i)
+    {
+        Blob<Dtype>* net_param = net_params[i].get();
+        net_param->set_cpu_data(params + offset);
+        offset += net_param->count();
+    }
+}
+
+template<typename Dtype>
+void Solver<Dtype>::copy_diffs_to_net(Dtype* diffs)
+{
+    std::vector<shared_ptr<Blob<Dtype> > > net_params = net_->params();
+    int offset = 0;
+    for (int i = 0; i < net_params.size(); ++i)
+    {
+        Blob<Dtype>* net_param = net_params[i].get();
+        //fjr
+        //net_param->set_cpu_diff(diffs + offset);
+        memcpy(diffs+offset, net_param->mutable_cpu_diff(), sizeof(Dtype)*net_param->count());
+        offset += net_param->count();
+    }
+}
+
+template<typename Dtype>
+void Solver<Dtype>::find_net_size(int & param_size)
+{
+      std::vector<shared_ptr<Blob<Dtype> > > net_params = net_->params();
+      param_size = 0;
+      for (int i = 0; i < net_params.size(); ++i)
+      {
+          const Blob<Dtype>* net_param = net_params[i].get();
+          param_size += net_param->count();
+      }
+}
 
 template<typename Dtype>
 void Solver<Dtype>::SetActionFunction(ActionCallback func) {
@@ -83,6 +152,7 @@ Solver<Dtype>::Solver(const SolverParameter& param, const Solver* root_solver)
       forward_backward_(boost::bind(&Solver<Dtype>::ForwardBackward, this)) {
   Init(param);
   Caffe::set_iter_size(param_.iter_size());
+  LOG(INFO) << "debug inside Solver";
 }
 
 template <typename Dtype>
@@ -91,6 +161,7 @@ Solver<Dtype>::Solver(const string& param_file, const Solver* root_solver)
       requested_early_exit_(false),
       forward_backward_(boost::bind(&Solver<Dtype>::ForwardBackward, this)) {
   SolverParameter param;
+  std::cout << "Solver Construction" <<std::endl;
   ReadSolverParamsFromTextFileOrDie(param_file, &param);
   Init(param);
   Caffe::set_iter_size(param_.iter_size());
@@ -280,6 +351,34 @@ Dtype Solver<Dtype>::ForwardBackward() {
 
 template <typename Dtype>
 void Solver<Dtype>::Step(int iters) {
+  LOG(INFO) << "inside Step";
+#ifdef USE_SELF_MPI
+  LOG(INFO) << "inside Step USE_SELF_MPI";
+	int world_size;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+	int world_rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+	char processor_name[MPI_MAX_PROCESSOR_NAME];
+  int name_len;
+  MPI_Get_processor_name(processor_name, &name_len);
+
+  printf("Hello world from processor %s, rank %d" " out of %d processors\n", processor_name, world_rank, world_size);
+
+	shared_ptr<Net<Dtype> > myNet;
+	myNet = net();
+	int param_size;
+	find_net_size(param_size);
+	printf("****** rank %d: number of layers is %d, paramter size is %d ******\n", world_rank, (int)(myNet->params().size()), param_size);
+
+	Dtype * local_param = (Dtype *)malloc(param_size*sizeof(Dtype));
+	Dtype * local_diff  = (Dtype *)malloc(param_size*sizeof(Dtype));
+	Dtype * global_diff = (Dtype *)malloc(param_size*sizeof(Dtype));
+
+	copy_params_from_net(local_param);
+	caffe_mpi_bcast<Dtype>(local_param, param_size, 0, MPI_COMM_WORLD);
+	copy_params_to_net(local_param);
+
+#endif
   const int start_iter = iter_;
   const int stop_iter = iter_ + iters;
   int average_loss = this->param_.average_loss();
@@ -385,6 +484,20 @@ void Solver<Dtype>::Step(int iters) {
       // Break out of training loop.
       break;
     }
+#ifdef USE_SELF_MPI
+		copy_diffs_from_net(local_diff);
+		caffe_mpi_allreduce<Dtype>(local_diff, global_diff, param_size, MPI_SUM, MPI_COMM_WORLD);
+    LOG(INFO) << "USE_SELF_MPI allreduce ";
+		#pragma omp parallel for
+		#pragma simd
+		for(int j=0;j<param_size;j++)
+			local_param[j] -= global_diff[j];
+
+		copy_params_to_net(local_param);
+#elif
+    LOG(INFO) << "NOT USE_SELF_MPI allreduce ";
+#endif
+    LOG(INFO) << "END USE_SELF_MPI allreduce ";
   }
 
 #ifdef CAFFE_PER_LAYER_TIMINGS
